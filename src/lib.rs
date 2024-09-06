@@ -492,7 +492,8 @@ pub fn to_primitive(input: TokenStream) -> TokenStream {
                 _ = repr_attr.parse_nested_meta(|meta| {
                     if let Some(ident) = meta.path.get_ident() {
                         if [
-                            "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128",
+                            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64",
+                            "i128", "isize",
                         ]
                         .iter()
                         .any(|i| ident == i)
@@ -515,7 +516,7 @@ pub fn to_primitive(input: TokenStream) -> TokenStream {
                 impl #import::ToPrimitive for #name {
                     #[inline]
                     fn to_i64(&self) -> ::core::option::Option<i64> {
-                        Some(unsafe { *(self as *const Self as *const #discriminant_type) }.into())
+                        unsafe { *(self as *const Self as *const #discriminant_type) }.try_into().ok()
                     }
 
                     #[inline]
