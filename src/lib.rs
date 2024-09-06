@@ -481,56 +481,101 @@ pub fn to_primitive(input: TokenStream) -> TokenStream {
             }
         }
     } else {
-        let variants = match ast.data {
-            Data::Enum(ref data_enum) => &data_enum.variants,
-            _ => panic!(
-                "`ToPrimitive` can be applied only to enums and newtypes, {} is neither",
-                name
-            ),
-        };
-
-        let variants: Vec<_> = variants
+        // Special case for enums with primitive representation
+        if let Some(discriminant_type) = ast
+            .attrs
             .iter()
-            .map(|variant| {
-                let ident = &variant.ident;
-                match variant.fields {
-                    Fields::Unit => (),
-                    _ => {
-                        panic!("`ToPrimitive` can be applied only to unitary enums and newtypes, {}::{} is either struct or tuple", name, ident)
-                    },
-                }
+            .find(|attr| attr.path().is_ident("repr"))
+            .and_then(|repr_attr| {
+                let mut discriminant_type = None;
 
-                // NB: We have to check each variant individually, because we'll only have `&self`
-                // for the input.  We can't move from that, and it might not be `Clone` or `Copy`.
-                // (Otherwise we could just do `*self as i64` without a `match` at all.)
-                quote!(#name::#ident => #name::#ident as i64)
+                _ = repr_attr.parse_nested_meta(|meta| {
+                    if let Some(ident) = meta.path.get_ident() {
+                        if [
+                            "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128",
+                        ]
+                        .iter()
+                        .any(|i| ident == i)
+                        {
+                            discriminant_type = Some(ident.clone());
+                        }
+                    }
+
+                    Ok(())
+                });
+
+                discriminant_type
             })
-            .collect();
-
-        let match_expr = if variants.is_empty() {
-            // No variants found, so do not use Some to not to trigger `unreachable_code` lint
+        {
+            // SAFETY: Because `Self` is marked `repr(u*/i*)`, its layout is a `repr(C)` `union`
+            // between `repr(C)` structs, each of which has the `u*/i*` discriminant as its first
+            // field, so we can read the discriminant without offsetting the pointer.
+            // https://doc.rust-lang.org/reference/items/enumerations.html#pointer-casting
             quote! {
-                match *self {}
+                impl #import::ToPrimitive for #name {
+                    #[inline]
+                    fn to_i64(&self) -> ::core::option::Option<i64> {
+                        Some(unsafe { *(self as *const Self as *const #discriminant_type) }.into())
+                    }
+
+                    #[inline]
+                    fn to_u64(&self) -> ::core::option::Option<u64> {
+                        unsafe { *(self as *const Self as *const #discriminant_type) }.try_into().ok()
+                    }
+                }
             }
         } else {
-            quote! {
-                ::core::option::Option::Some(match *self {
-                    #(#variants,)*
+            let variants = match ast.data {
+                Data::Enum(ref data_enum) => &data_enum.variants,
+                _ => panic!(
+                    "`ToPrimitive` can be applied only to enums and newtypes, {} is neither",
+                    name
+                ),
+            };
+
+            let variants: Vec<_> = variants
+                .iter()
+                .map(|variant| {
+                    let ident = &variant.ident;
+                    match variant.fields {
+                        Fields::Unit => (),
+                        _ => {
+                            panic!("`ToPrimitive` can be applied only to unitary enums, enums with #[repr(u*/i*)] attribute and newtypes, {}::{} is either struct or tuple", name, ident)
+                        },
+                    }
+
+                    // NB: We have to check each variant individually, because we'll only have `&self`
+                    // for the input.  We can't move from that, and it might not be `Clone` or `Copy`.
+                    // (Otherwise we could just do `*self as i64` without a `match` at all.)
+                    quote!(#name::#ident => #name::#ident as i64)
                 })
-            }
-        };
+                .collect();
 
-        quote! {
-            impl #import::ToPrimitive for #name {
-                #[inline]
-                #[allow(trivial_numeric_casts)]
-                fn to_i64(&self) -> ::core::option::Option<i64> {
-                    #match_expr
+            let match_expr = if variants.is_empty() {
+                // No variants found, so do not use Some to not to trigger `unreachable_code` lint
+                quote! {
+                    match *self {}
                 }
+            } else {
+                quote! {
+                    ::core::option::Option::Some(match *self {
+                        #(#variants,)*
+                    })
+                }
+            };
 
-                #[inline]
-                fn to_u64(&self) -> ::core::option::Option<u64> {
-                    self.to_i64().map(|x| x as u64)
+            quote! {
+                impl #import::ToPrimitive for #name {
+                    #[inline]
+                    #[allow(trivial_numeric_casts)]
+                    fn to_i64(&self) -> ::core::option::Option<i64> {
+                        #match_expr
+                    }
+
+                    #[inline]
+                    fn to_u64(&self) -> ::core::option::Option<u64> {
+                        self.to_i64().map(|x| x as u64)
+                    }
                 }
             }
         }
